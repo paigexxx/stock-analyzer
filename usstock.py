@@ -192,6 +192,56 @@ st.markdown(f"""
 .sx .tg {{ font-size:0.78rem;color:{TD};line-height:1.5; }}
 .sx .pp {{ font-family:'JetBrains Mono',monospace;font-size:1rem;font-weight:700; }}
 .sx .wh {{ font-size:0.68rem;color:#6b7280;margin-top:3px; }}
+
+/* ── Multi-Timeframe ── */
+.mtf-grid {{
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin: 8px 0 12px;
+}}
+.mtf-row {{
+    display: grid;
+    grid-template-columns: 70px 1fr 1fr 1fr 1fr;
+    gap: 4px;
+    align-items: center;
+    background: {S2};
+    border-radius: 8px;
+    padding: 8px 10px;
+}}
+.mtf-row.hdr {{
+    background: transparent;
+    padding: 4px 10px;
+}}
+.mtf-row .tf-label {{
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 600;
+}}
+.mtf-row .tf-val {{
+    font-size: 0.75rem;
+    text-align: center;
+}}
+.mtf-row .tf-hdr {{
+    font-size: 0.6rem;
+    color: {TD};
+    text-transform: uppercase;
+    text-align: center;
+    letter-spacing: 0.3px;
+}}
+.mtf-verdict {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin: 8px 0 4px;
+}}
+.mtf-verdict.bullish {{ background: rgba(16,185,129,0.1); color: {GR}; }}
+.mtf-verdict.bearish {{ background: rgba(239,68,68,0.1); color: {RD}; }}
+.mtf-verdict.mixed {{ background: rgba(245,158,11,0.1); color: {AM}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -230,6 +280,83 @@ def fetch_all(tickers, period):
             try: res.setdefault(t,{})["info"]=f.result()
             except: res.setdefault(t,{})["info"]={}
     return res
+
+# ── Multi-timeframe data ──
+@st.cache_data(ttl=300)
+def fetch_weekly(ticker):
+    """Fetch weekly data for multi-timeframe analysis."""
+    try:
+        df = yf.Ticker(ticker).history(period="2y", interval="1wk")
+    except: return pd.DataFrame()
+    if df.empty or len(df) < 10: return pd.DataFrame()
+    df["MA10"]=df["Close"].rolling(10).mean()  # ~50 day
+    df["MA40"]=df["Close"].rolling(40).mean()  # ~200 day
+    d=df["Close"].diff(); g=d.where(d>0,0).rolling(14).mean(); l=(-d.where(d<0,0)).rolling(14).mean(); rs=g/l; df["RSI"]=100-(100/(1+rs))
+    e12=df["Close"].ewm(span=12).mean(); e26=df["Close"].ewm(span=26).mean(); df["MACD"]=e12-e26; df["MACD_Signal"]=df["MACD"].ewm(span=9).mean()
+    return df
+
+@st.cache_data(ttl=300)
+def fetch_monthly(ticker):
+    """Fetch monthly data for multi-timeframe analysis."""
+    try:
+        df = yf.Ticker(ticker).history(period="5y", interval="1mo")
+    except: return pd.DataFrame()
+    if df.empty or len(df) < 6: return pd.DataFrame()
+    df["MA6"]=df["Close"].rolling(6).mean()   # ~6 month
+    df["MA12"]=df["Close"].rolling(12).mean()  # ~1 year
+    d=df["Close"].diff(); g=d.where(d>0,0).rolling(14).mean(); l=(-d.where(d<0,0)).rolling(14).mean(); rs=g/l; df["RSI"]=100-(100/(1+rs))
+    e12=df["Close"].ewm(span=12).mean(); e26=df["Close"].ewm(span=26).mean(); df["MACD"]=e12-e26; df["MACD_Signal"]=df["MACD"].ewm(span=9).mean()
+    return df
+
+def calc_tf_signal(df, tf_label):
+    """Calculate trend signal for a given timeframe's dataframe."""
+    if df.empty or len(df) < 5:
+        return {"tf": tf_label, "trend": "—", "rsi": None, "macd": "—", "ma_status": "—"}
+    
+    cur = df["Close"].iloc[-1]
+    rsi_val = df["RSI"].iloc[-1] if "RSI" in df.columns and not pd.isna(df["RSI"].iloc[-1]) else None
+    
+    # MACD
+    macd_ok = False
+    if "MACD" in df.columns and "MACD_Signal" in df.columns:
+        mv = df["MACD"].iloc[-1]; sv = df["MACD_Signal"].iloc[-1]
+        if not pd.isna(mv) and not pd.isna(sv):
+            macd_ok = mv > sv
+    macd_str = "🟢 多" if macd_ok else "🔴 空"
+    
+    # MA trend
+    ma_cols = [c for c in df.columns if c.startswith("MA")]
+    ma_status = "—"
+    if len(ma_cols) >= 2:
+        short_ma = df[ma_cols[0]].iloc[-1]
+        long_ma = df[ma_cols[1]].iloc[-1]
+        if not pd.isna(short_ma) and not pd.isna(long_ma):
+            if short_ma > long_ma:
+                ma_status = "🟢 短均>長均"
+            else:
+                ma_status = "🔴 短均<長均"
+    
+    # Overall trend
+    bullish = 0
+    if macd_ok: bullish += 1
+    if rsi_val and rsi_val > 50: bullish += 1
+    if ma_status.startswith("🟢"): bullish += 1
+    
+    if bullish >= 2:
+        trend = "🟢 偏多"
+    elif bullish == 0:
+        trend = "🔴 偏空"
+    else:
+        trend = "🟡 中性"
+    
+    return {
+        "tf": tf_label,
+        "trend": trend,
+        "rsi": rsi_val,
+        "macd": macd_str,
+        "ma_status": ma_status,
+        "close": cur,
+    }
 
 def calc_pb(df):
     if df.empty or len(df)<20: return {}
@@ -527,6 +654,109 @@ for idx,t in enumerate(st_t):
             xaxis_rangeslider_visible=False,margin=dict(l=40,r=5,t=20,b=15),xaxis=dict(gridcolor=BD),yaxis=dict(gridcolor=BD))
         st.plotly_chart(kf, use_container_width=True)
 
+    # ── Multi-Timeframe Analysis ──
+    with st.expander(f"🔀 {t} 多週期趨勢分析（日/週/月）", expanded=(idx==0)):
+        # Fetch weekly & monthly
+        wk_df = fetch_weekly(t)
+        mo_df = fetch_monthly(t)
+
+        # Calculate signals per timeframe
+        daily_sig = calc_tf_signal(df, "日線")
+        weekly_sig = calc_tf_signal(wk_df, "週線")
+        monthly_sig = calc_tf_signal(mo_df, "月線")
+        tf_sigs = [daily_sig, weekly_sig, monthly_sig]
+
+        # Traffic-light summary table
+        mtf_html = '<div class="mtf-grid">'
+        mtf_html += f'''<div class="mtf-row hdr">
+            <div class="tf-hdr" style="text-align:left;">週期</div>
+            <div class="tf-hdr">趨勢</div>
+            <div class="tf-hdr">RSI</div>
+            <div class="tf-hdr">MACD</div>
+            <div class="tf-hdr">均線</div>
+        </div>'''
+        for sig in tf_sigs:
+            rsi_s = f'{sig["rsi"]:.0f}' if sig["rsi"] else "—"
+            mtf_html += f'''<div class="mtf-row">
+                <div class="tf-label">{sig["tf"]}</div>
+                <div class="tf-val">{sig["trend"]}</div>
+                <div class="tf-val">{rsi_s}</div>
+                <div class="tf-val">{sig["macd"]}</div>
+                <div class="tf-val">{sig["ma_status"]}</div>
+            </div>'''
+        mtf_html += '</div>'
+        st.markdown(mtf_html, unsafe_allow_html=True)
+
+        # Overall verdict
+        bull_count = sum(1 for s in tf_sigs if "🟢" in s["trend"])
+        bear_count = sum(1 for s in tf_sigs if "🔴" in s["trend"])
+        if bull_count >= 2:
+            verdict_cls = "bullish"
+            verdict_txt = "多週期偏多 — 日/週/月線趨勢共振向上，回檔可視為布局機會"
+        elif bear_count >= 2:
+            verdict_cls = "bearish"
+            verdict_txt = "多週期偏空 — 多數週期趨勢向下，建議等待更明確的止穩訊號"
+        else:
+            verdict_cls = "mixed"
+            verdict_txt = "多空分歧 — 長短週期趨勢不一致，適合觀望或輕倉試探"
+        st.markdown(f'<div class="mtf-verdict {verdict_cls}">{verdict_txt}</div>', unsafe_allow_html=True)
+
+        # Multi-timeframe K-line subplots
+        has_wk = not wk_df.empty
+        has_mo = not mo_df.empty
+        n_rows = 1 + (1 if has_wk else 0) + (1 if has_mo else 0)
+        subtitles = ["日線"]
+        if has_wk: subtitles.append("週線")
+        if has_mo: subtitles.append("月線")
+
+        mtf_fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=False, vertical_spacing=0.08,
+                                subplot_titles=subtitles, row_heights=[1]*n_rows)
+
+        # Daily
+        mtf_fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+            increasing_fillcolor=GR, increasing_line_color=GR, decreasing_fillcolor=RD, decreasing_line_color=RD,
+            name="日K", showlegend=False), row=1, col=1)
+        for mac, mcc in [("MA20",AM),("MA50",BL),("MA200",RD)]:
+            if mac in df.columns:
+                mtf_fig.add_trace(go.Scatter(x=df.index, y=df[mac], line=dict(color=mcc, width=1), opacity=0.7,
+                    name=mac, showlegend=(mac=="MA20")), row=1, col=1)
+
+        # Weekly
+        r = 2
+        if has_wk:
+            mtf_fig.add_trace(go.Candlestick(x=wk_df.index, open=wk_df["Open"], high=wk_df["High"], low=wk_df["Low"], close=wk_df["Close"],
+                increasing_fillcolor=GR, increasing_line_color=GR, decreasing_fillcolor=RD, decreasing_line_color=RD,
+                name="週K", showlegend=False), row=r, col=1)
+            for mac, mcc in [("MA10",AM),("MA40",RD)]:
+                if mac in wk_df.columns:
+                    mtf_fig.add_trace(go.Scatter(x=wk_df.index, y=wk_df[mac], line=dict(color=mcc, width=1), opacity=0.7,
+                        showlegend=False), row=r, col=1)
+            r += 1
+
+        # Monthly
+        if has_mo:
+            mtf_fig.add_trace(go.Candlestick(x=mo_df.index, open=mo_df["Open"], high=mo_df["High"], low=mo_df["Low"], close=mo_df["Close"],
+                increasing_fillcolor=GR, increasing_line_color=GR, decreasing_fillcolor=RD, decreasing_line_color=RD,
+                name="月K", showlegend=False), row=r, col=1)
+            for mac, mcc in [("MA6",AM),("MA12",RD)]:
+                if mac in mo_df.columns:
+                    mtf_fig.add_trace(go.Scatter(x=mo_df.index, y=mo_df[mac], line=dict(color=mcc, width=1), opacity=0.7,
+                        showlegend=False), row=r, col=1)
+
+        chart_h = 220 * n_rows
+        mtf_fig.update_layout(
+            height=chart_h, template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="JetBrains Mono", size=9),
+            margin=dict(l=40, r=5, t=30, b=15),
+            showlegend=False,
+        )
+        for i in range(1, n_rows+1):
+            mtf_fig.update_xaxes(gridcolor=BD, row=i, col=1, rangeslider_visible=False)
+            mtf_fig.update_yaxes(gridcolor=BD, row=i, col=1)
+
+        st.plotly_chart(mtf_fig, use_container_width=True)
+
     # Step plan
     plan=gen_plan(m,tb)
     shtml='<div class="sp">'
@@ -558,9 +788,15 @@ for t in st_t:
     stx2,_=get_sig(m["pb"],m["rsi"])
     plan=gen_plan(m,bg*w); ent=[p for p in plan if p["pct"]>0]; stp=[p for p in plan if p["pct"]==-100]
     fe=ent[0]["pt"] if ent else m["cur"]; spp=stp[0]["pt"] if stp else m["cur"]*0.9
+    # Multi-timeframe verdict for summary
+    d_sig=calc_tf_signal(all_d[t],"日")
+    w_sig=calc_tf_signal(fetch_weekly(t),"週")
+    m_sig=calc_tf_signal(fetch_monthly(t),"月")
+    bc=sum(1 for s in [d_sig,w_sig,m_sig] if "🟢" in s["trend"])
+    mtf_v="🟢 多" if bc>=2 else ("🔴 空" if bc==0 else "🟡 分歧")
     mt.append({"標的":t,"公司":inf.get("shortName",t)[:15],"現價":f'${m["cur"]:.2f}',"回檔":f'{m["pb"]:.1f}%',
         "RSI":fmt(m["rsi"]),"MACD":"🟢" if m["macd"] and m["macd_sig"] and m["macd"]>m["macd_sig"] else "🔴",
-        "訊號":stx2,"分配":f'${bg*w:,.0f}',"首批進場":f'${fe:.2f}',"停損":f'${spp:.2f}'})
+        "多週期":mtf_v,"訊號":stx2,"分配":f'${bg*w:,.0f}',"首批進場":f'${fe:.2f}',"停損":f'${spp:.2f}'})
 st.dataframe(pd.DataFrame(mt),use_container_width=True,hide_index=True)
 
 
